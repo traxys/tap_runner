@@ -8,4 +8,5 @@ edition = "2021"
 anyhow = "1.0.70"
 clap = { version = "4.2.1", features = ["derive"] }
 crossterm = "0.26.1"
+duct = "0.13.6"
 tui = { package = "ratatui", version = "0.20.1" }

@@ -34,18 +34,29 @@ impl ErrorTracker {
 struct App {
     test_command: String,
     test_args: Vec<String>,
+    build_command: Option<String>,
+    build_args: Vec<String>,
 
     err: Option<ErrorTracker>,
 }
 
 impl App {
-    fn new(test: Vec<String>) -> Self {
+    fn new(test: Vec<String>, build: Option<Vec<String>>) -> Self {
         let mut test = test.into_iter();
         let test_command = test.next().unwrap();
+        let (build_command, build_args) = match build {
+            None => (None, Vec::new()),
+            Some(b) => {
+                let mut build = b.into_iter();
+                (build.next(), build.collect())
+            }
+        };
 
         let mut this = Self {
             test_command,
             test_args: test.collect(),
+            build_command,
+            build_args,
             err: None,
         };
 
@@ -57,6 +68,20 @@ impl App {
     }
 
     fn run_tests(&mut self) -> anyhow::Result<()> {
+        if let Some(build) = &self.build_command {
+            let result = duct::cmd(build, &self.build_args)
+                .stderr_to_stdout()
+                .stdout_capture()
+                .unchecked()
+                .run()?;
+            if !result.status.success() {
+                anyhow::bail!(
+                    "Build command failed: {}",
+                    String::from_utf8_lossy(&result.stdout)
+                )
+            }
+        }
+
         let mut command = Command::new(&self.test_command);
         command.args(&self.test_args);
         let _output = command.output()?;
@@ -138,6 +163,8 @@ impl App {
 struct Args {
     #[arg(required = true)]
     run_command: Vec<String>,
+    #[arg(long, short, value_delimiter = ',')]
+    build_command: Option<Vec<String>>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -149,7 +176,8 @@ fn main() -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let res = App::new(args.run_command).run(&mut terminal, Duration::from_secs_f64(0.1));
+    let res = App::new(args.run_command, args.build_command)
+        .run(&mut terminal, Duration::from_secs_f64(0.1));
 
     crossterm::terminal::disable_raw_mode()?;
     crossterm::execute!(
