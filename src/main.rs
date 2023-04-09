@@ -573,7 +573,7 @@ struct Args {
     build_command: Option<Vec<String>>,
     #[arg(long, short)]
     location_filter: Option<String>,
-    #[arg(long, short)]
+    #[arg(long, short, requires = "location_filter")]
     preview: bool,
 }
 
