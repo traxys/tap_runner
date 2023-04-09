@@ -15,6 +15,9 @@ use tui::{
     Frame, Terminal,
 };
 
+use widgets::ColoredList;
+mod widgets;
+
 pub struct ErrorTracker {
     error: String,
     created_at: Instant,
