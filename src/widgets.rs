@@ -85,6 +85,10 @@ impl<T> StatefulList<T> {
         )
     }
 
+    pub fn selected(&self) -> Option<&T> {
+        self.state.selected().map(|i| &self.items[i])
+    }
+
     pub fn with_items(items: Vec<T>) -> StatefulList<T> {
         StatefulList {
             state: ListState::default(),

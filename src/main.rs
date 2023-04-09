@@ -1,9 +1,12 @@
 use std::{
+    env,
+    path::Path,
     process::Command,
     str::FromStr,
     time::{Duration, Instant},
 };
 
+use ansi_to_tui::IntoText;
 use clap::Parser;
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
@@ -14,9 +17,9 @@ use jaq_core::{Definitions, Filter};
 use tap_parser::{DirectiveKind, TapParser, TapStatement, TapTest};
 use tui::{
     backend::{Backend, CrosstermBackend},
-    layout::{Alignment, Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::Color,
-    text::{Span, Spans},
+    text::{Span, Spans, Text},
     widgets::{Block, BorderType, Borders, ListItem, Paragraph, Wrap},
     Frame, Terminal,
 };
@@ -92,6 +95,8 @@ struct App {
     build_command: Option<String>,
     build_args: Vec<String>,
 
+    preview: bool,
+
     location_filter: Option<Filter>,
 
     err: Option<ErrorTracker>,
@@ -130,6 +135,7 @@ impl App {
         test: Vec<String>,
         build: Option<Vec<String>>,
         location_filter: Option<String>,
+        preview: bool,
     ) -> anyhow::Result<Self> {
         let mut test = test.into_iter();
         let test_command = test.next().unwrap();
@@ -148,6 +154,7 @@ impl App {
             build_args,
             err: None,
             could_run: true,
+            preview,
             statuses: Vec::new(),
             skipped: Vec::new(),
             failure: StatefulList::empty(),
@@ -458,8 +465,31 @@ impl App {
             f.render_widget(p, chunks[2])
         }
 
+        let mut failure_location = chunks[3];
+        if self.preview {
+            if let Some((_, _, _, Some(location))) = self.failure.selected() {
+                let preview_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .split(chunks[3]);
+
+                match generate_failure_preview(location, preview_chunks[1]) {
+                    Ok(p) => {
+                        f.render_widget(
+                            Paragraph::new(p).block(Block::default().borders(Borders::all())),
+                            preview_chunks[1],
+                        );
+                        failure_location = preview_chunks[0];
+                    }
+                    Err(e) => {
+                        self.err = Some(ErrorTracker::new(e));
+                    }
+                };
+            }
+        }
+
         self.failure
-            .render(f, chunks[3], |(num, desc, yaml, location)| {
+            .render(f, failure_location, |(num, desc, yaml, location)| {
                 let mut lines = Vec::new();
                 lines.push(
                     Span::raw(
@@ -488,6 +518,41 @@ impl App {
     }
 }
 
+fn generate_failure_preview(location: &Location, area: Rect) -> anyhow::Result<Text> {
+    if !Path::new(&location.file).exists() {
+        anyhow::bail!("File {} does not exist", location.file)
+    }
+
+    let shell = env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
+    let mut preview = Command::new(shell)
+        .arg("-c")
+        .arg(format!(
+            "bat --force-colorization --terminal-width {} {} --highlight-line {}",
+            area.width - 2,
+            location.file,
+            location.line
+        ))
+        .output()?
+        .stdout
+        .into_text()?;
+
+    let height = area.height - 2;
+
+    if location.line > height as usize {
+        let out = location.line - height as usize;
+        let discard_to_center = out + (height as usize) / 2;
+        let would_remain = preview.lines.len() - discard_to_center;
+        let discard = if would_remain > height as usize {
+            discard_to_center
+        } else {
+            discard_to_center - (height as usize - would_remain)
+        };
+        preview.lines.drain(0..discard);
+    }
+
+    Ok(preview)
+}
+
 #[derive(Parser, Debug)]
 struct Args {
     #[arg(required = true)]
@@ -496,6 +561,8 @@ struct Args {
     build_command: Option<Vec<String>>,
     #[arg(long, short)]
     location_filter: Option<String>,
+    #[arg(long, short)]
+    preview: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -507,8 +574,13 @@ fn main() -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let res = App::new(args.run_command, args.build_command, args.location_filter)?
-        .run(&mut terminal, Duration::from_secs_f64(0.1));
+    let res = App::new(
+        args.run_command,
+        args.build_command,
+        args.location_filter,
+        args.preview,
+    )?
+    .run(&mut terminal, Duration::from_secs_f64(0.1));
 
     crossterm::terminal::disable_raw_mode()?;
     crossterm::execute!(

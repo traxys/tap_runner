@@ -5,6 +5,7 @@ authors = ["traxys <quentin@familleboyer.net>"]
 edition = "2021"
 
 [dependencies]
+ansi-to-tui = "3.0.0"
 anyhow = "1.0.70"
 clap = { version = "4.2.1", features = ["derive"] }
 crossterm = "0.26.1"
