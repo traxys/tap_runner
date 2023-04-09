@@ -4,6 +4,11 @@ version = "0.1.0"
 authors = ["traxys <quentin@familleboyer.net>"]
 edition = "2021"
 
+[[bin]]
+bench = false
+path = "src/main.rs"
+name = "tapr"
+
 [dependencies]
 ansi-to-tui = "3.0.0"
 anyhow = "1.0.70"
