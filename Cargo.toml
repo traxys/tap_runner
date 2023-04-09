@@ -3,6 +3,9 @@ name = "tap_runner"
 version = "0.1.0"
 authors = ["traxys <quentin@familleboyer.net>"]
 edition = "2021"
+license = "GPL-3.0-or-later"
+description = "A simple UI to run & view TAP test results"
+repository = "https://github.com/traxys/tap_runner"
 
 [[bin]]
 bench = false
@@ -22,3 +25,19 @@ serde_yaml = "0.9.21"
 tap_parser = "0.1.1"
 tui = { package = "ratatui", version = "0.20.1" }
 which = "4.4.0"
+
+# The profile that 'cargo dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
+# Config for 'cargo dist'
+[workspace.metadata.dist]
+# The preferred cargo-dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.0.5"
+# The preferred Rust toolchain to use in CI (rustup toolchain syntax)
+rust-toolchain-version = "1.67.1"
+# CI backends to support (see 'cargo dist generate-ci')
+ci = ["github"]
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = ["x86_64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "aarch64-apple-darwin"]
