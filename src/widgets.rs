@@ -1,6 +1,9 @@
 use tui::{
-    style::Color,
-    widgets::{Block, Widget},
+    backend::Backend,
+    layout::Rect,
+    style::{Color, Style},
+    widgets::{Block, List, ListItem, ListState, Widget},
+    Frame,
 };
 
 pub struct ColoredList<'a> {
@@ -56,5 +59,68 @@ impl Widget for ColoredList<'_> {
                     .set_symbol(".");
             }
         }
+    }
+}
+
+pub struct StatefulList<T> {
+    state: ListState,
+    items: Vec<T>,
+}
+
+impl<T> StatefulList<T> {
+    pub fn empty() -> Self {
+        Self::with_items(Vec::new())
+    }
+
+    pub fn render<B, F>(&mut self, frame: &mut Frame<B>, area: Rect, make_item: F)
+    where
+        B: Backend,
+        F: FnMut(&T) -> ListItem,
+    {
+        frame.render_stateful_widget(
+            List::new(Vec::from_iter(self.items.iter().map(make_item)))
+                .highlight_style(Style::default().bg(Color::Rgb(0x33, 0x46, 0x7c))),
+            area,
+            &mut self.state,
+        )
+    }
+
+    pub fn with_items(items: Vec<T>) -> StatefulList<T> {
+        StatefulList {
+            state: ListState::default(),
+            items,
+        }
+    }
+
+    pub fn next(&mut self) {
+        let i = match self.state.selected() {
+            Some(i) => {
+                if i >= self.items.len() - 1 {
+                    0
+                } else {
+                    i + 1
+                }
+            }
+            None => 0,
+        };
+        self.state.select(Some(i));
+    }
+
+    pub fn previous(&mut self) {
+        let i = match self.state.selected() {
+            Some(i) => {
+                if i == 0 {
+                    self.items.len() - 1
+                } else {
+                    i - 1
+                }
+            }
+            None => 0,
+        };
+        self.state.select(Some(i));
+    }
+
+    pub fn unselect(&mut self) {
+        self.state.select(None);
     }
 }
