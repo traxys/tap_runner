@@ -1,5 +1,6 @@
 use std::{
     process::Command,
+    str::FromStr,
     time::{Duration, Instant},
 };
 
@@ -9,6 +10,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen},
 };
 use itertools::Itertools;
+use jaq_core::{Definitions, Filter};
 use tap_parser::{DirectiveKind, TapParser, TapStatement, TapTest};
 use tui::{
     backend::{Backend, CrosstermBackend},
@@ -52,8 +54,30 @@ struct Test {
     desc: Option<String>,
     directive: Option<Directive>,
     yaml: String,
+    location: Option<Location>,
 
     parents: Vec<usize>,
+}
+
+#[derive(Debug)]
+struct Location {
+    file: String,
+    line: usize,
+}
+
+impl FromStr for Location {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let Some((file, line)) = s.split_once(':') else {
+            anyhow::bail!("Missing `:` in location")
+        };
+
+        Ok(Self {
+            file: file.into(),
+            line: line.parse()?,
+        })
+    }
 }
 
 enum TestResult {
@@ -68,11 +92,13 @@ struct App {
     build_command: Option<String>,
     build_args: Vec<String>,
 
+    location_filter: Option<Filter>,
+
     err: Option<ErrorTracker>,
 
     statuses: Vec<TestResult>,
     skipped: Vec<(String, Option<String>, Option<String>)>,
-    failure: StatefulList<(String, Option<String>, String)>,
+    failure: StatefulList<(String, Option<String>, String, Option<Location>)>,
     could_run: bool,
 }
 
@@ -100,7 +126,11 @@ where
 }
 
 impl App {
-    fn new(test: Vec<String>, build: Option<Vec<String>>) -> Self {
+    fn new(
+        test: Vec<String>,
+        build: Option<Vec<String>>,
+        location_filter: Option<String>,
+    ) -> anyhow::Result<Self> {
         let mut test = test.into_iter();
         let test_command = test.next().unwrap();
         let (build_command, build_args) = match build {
@@ -121,13 +151,33 @@ impl App {
             statuses: Vec::new(),
             skipped: Vec::new(),
             failure: StatefulList::empty(),
+            location_filter: location_filter
+                .map(|f| -> anyhow::Result<_> {
+                    let defs = Definitions::core();
+
+                    let (f, errs) = jaq_core::parse::parse(&f, jaq_core::parse::main());
+                    let f = match f {
+                        None => {
+                            anyhow::bail!("Errors parsing the filter: {}", errs.iter().join("\n"))
+                        }
+                        Some(f) => f,
+                    };
+                    let mut errs = Vec::new();
+                    let f = defs.finish(f, Vec::new(), &mut errs);
+                    if !errs.is_empty() {
+                        anyhow::bail!("Errors finishing the filter: {}", errs.iter().join("\n"))
+                    }
+
+                    Ok(f)
+                })
+                .transpose()?,
         };
 
         if let Err(e) = this.run_tests() {
             this.err = Some(ErrorTracker::new(e));
         };
 
-        this
+        Ok(this)
     }
 
     fn run_tests(&mut self) -> anyhow::Result<()> {
@@ -159,35 +209,80 @@ impl App {
         let mut parser = TapParser::new();
         let document = parser.parse(&tap)?;
 
-        fn handle_body(
-            body: Vec<TapStatement>,
+        fn handle_body<'a, 'f: 'a>(
+            body: Vec<TapStatement<'a>>,
             parents: Vec<usize>,
-        ) -> impl Iterator<Item = Test> + '_ {
+            filter: &'f Option<Filter>,
+        ) -> impl Iterator<Item = (Test, Option<ErrorTracker>)> + 'a {
             body.into_iter()
                 .enumerate()
-                .flat_map(move |(i, st)| handle_statement(st, i, parents.clone()))
+                .flat_map(move |(i, st)| handle_statement(st, i, parents.clone(), filter))
         }
 
-        fn handle_statement(
-            statement: TapStatement,
+        fn handle_statement<'a, 'f: 'a>(
+            statement: TapStatement<'a>,
             number: usize,
             parents: Vec<usize>,
-        ) -> impl Iterator<Item = Test> + '_ {
-            fn handle_test_point(test: TapTest, parents: Vec<usize>, number: usize) -> Test {
-                Test {
-                    result: test.result,
-                    number: test.number.unwrap_or(number),
-                    desc: test.desc.map(ToString::to_string),
-                    directive: test.directive.as_ref().map(|d| Directive {
-                        key: match &d.kind {
-                            DirectiveKind::Skip => DirectiveKind::Skip,
-                            DirectiveKind::Todo => DirectiveKind::Todo,
-                        },
-                        reason: d.reason.map(ToString::to_string),
-                    }),
-                    yaml: test.yaml.join("\n"),
-                    parents: parents.to_vec(),
-                }
+            filter: &'f Option<Filter>,
+        ) -> impl Iterator<Item = (Test, Option<ErrorTracker>)> + 'a {
+            fn handle_test_point(
+                test: TapTest,
+                parents: Vec<usize>,
+                number: usize,
+                filter: &Option<Filter>,
+            ) -> (Test, Option<ErrorTracker>) {
+                let mut err = None;
+                let yaml = test.yaml.join("\n");
+                let location = match filter {
+                    Some(f) if !yaml.is_empty() => {
+                        match serde_yaml::from_str::<serde_yaml::Value>(&yaml) {
+                            Ok(v) => {
+                                let json = serde_json::to_value(&v)
+                                    .expect("Could not parse back YAML into JSON");
+                                let inputs = jaq_core::RcIter::new(core::iter::empty());
+                                let mut out = f.run(
+                                    jaq_core::Ctx::new([], &inputs),
+                                    jaq_core::Val::from(json),
+                                );
+                                match out.next().map(|v| v.map(|r| r.to_str().map(|s| s.parse()))) {
+                                    None => None,
+                                    Some(Err(e)) | Some(Ok(Err(e))) => {
+                                        err = Some(ErrorTracker::new(e));
+                                        None
+                                    }
+                                    Some(Ok(Ok(Err(e)))) => {
+                                        err = Some(ErrorTracker::new(e));
+                                        None
+                                    }
+                                    Some(Ok(Ok(Ok(v)))) => Some(v),
+                                }
+                            }
+                            Err(e) => {
+                                err = Some(ErrorTracker::new(e));
+                                None
+                            }
+                        }
+                    }
+                    _ => None,
+                };
+                (
+                    Test {
+                        result: test.result,
+                        number: test.number.unwrap_or(number),
+                        desc: test.desc.map(ToString::to_string),
+                        directive: test.directive.as_ref().map(|d| Directive {
+                            key: match &d.kind {
+                                DirectiveKind::Skip => DirectiveKind::Skip,
+                                DirectiveKind::Todo => DirectiveKind::Todo,
+                            },
+                            reason: d.reason.map(ToString::to_string),
+                        }),
+                        yaml,
+                        location,
+                        parents: parents.to_vec(),
+                    },
+                    err,
+                )
             }
 
             match statement {
@@ -195,14 +290,14 @@ impl App {
                     let mut child_lineage = parents.to_vec();
                     child_lineage.push(number);
                     let b: Box<dyn Iterator<Item = _>> =
-                        Box::new(handle_body(s.statements, child_lineage));
+                        Box::new(handle_body(s.statements, child_lineage, filter));
                     Either3::One(b.chain(std::iter::once(handle_test_point(
-                        s.ending, parents, number,
+                        s.ending, parents, number, filter,
                     ))))
                 }
-                TapStatement::TestPoint(t) => {
-                    Either3::Two(std::iter::once(handle_test_point(t, parents, number)))
-                }
+                TapStatement::TestPoint(t) => Either3::Two(std::iter::once(handle_test_point(
+                    t, parents, number, filter,
+                ))),
                 _ => Either3::Three(std::iter::empty()),
             }
         }
@@ -210,14 +305,14 @@ impl App {
         self.statuses.clear();
         self.skipped.clear();
         let mut failure = Vec::new();
-        for test in handle_body(document, Vec::new()) {
+        for (test, err) in handle_body(document, Vec::new(), &self.location_filter) {
             let number = test
                 .parents
                 .iter()
                 .chain(std::iter::once(&test.number))
                 .join(".");
             if !test.result {
-                failure.push((number, test.desc, test.yaml));
+                failure.push((number, test.desc, test.yaml, test.location));
                 self.statuses.push(TestResult::Fail);
             } else {
                 match test.directive {
@@ -228,6 +323,7 @@ impl App {
                     _ => self.statuses.push(TestResult::Success),
                 };
             }
+            self.err = self.err.take().or(err);
         }
         self.failure = StatefulList::with_items(failure);
 
@@ -362,27 +458,33 @@ impl App {
             f.render_widget(p, chunks[2])
         }
 
-        self.failure.render(f, chunks[3], |(num, desc, yaml)| {
-            let mut lines = Vec::new();
-            lines.push(
-                Span::raw(
-                    num.clone()
-                        + &match desc {
-                            None => "".into(),
-                            Some(d) => format!(" - {d}"),
-                        },
-                )
-                .into(),
-            );
-            lines.push("----------".into());
-            lines.extend(
-                yaml.split('\n')
-                    .filter(|s| !s.is_empty())
-                    .map(|t| Spans::from(t.to_owned())),
-            );
-            lines.push("----------".into());
-            ListItem::new(lines)
-        });
+        self.failure
+            .render(f, chunks[3], |(num, desc, yaml, location)| {
+                let mut lines = Vec::new();
+                lines.push(
+                    Span::raw(
+                        num.clone()
+                            + &match desc {
+                                None => "".into(),
+                                Some(d) => format!(" - {d}"),
+                            },
+                    )
+                    .into(),
+                );
+                lines.push("----------".into());
+                if let Some(location) = location {
+                    lines.push(
+                        format!("Failure in '{}' at line {}", location.file, location.line).into(),
+                    );
+                };
+                lines.extend(
+                    yaml.split('\n')
+                        .filter(|s| !s.is_empty())
+                        .map(|t| Spans::from(t.to_owned())),
+                );
+                lines.push("----------".into());
+                ListItem::new(lines)
+            });
     }
 }
 
@@ -392,6 +494,8 @@ struct Args {
     run_command: Vec<String>,
     #[arg(long, short, value_delimiter = ',')]
     build_command: Option<Vec<String>>,
+    #[arg(long, short)]
+    location_filter: Option<String>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -403,7 +507,7 @@ fn main() -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let res = App::new(args.run_command, args.build_command)
+    let res = App::new(args.run_command, args.build_command, args.location_filter)?
         .run(&mut terminal, Duration::from_secs_f64(0.1));
 
     crossterm::terminal::disable_raw_mode()?;
