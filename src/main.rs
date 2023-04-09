@@ -137,6 +137,18 @@ impl App {
         location_filter: Option<String>,
         preview: bool,
     ) -> anyhow::Result<Self> {
+        if preview {
+            match which::which("bat") {
+                Ok(_) => (),
+                Err(which::Error::CannotFindBinaryPath) => {
+                    anyhow::bail!("Can't find executable `bat`, could not enable --preview");
+                }
+                Err(e) => {
+                    anyhow::bail!("Error in checking for conditions of preview: {e}")
+                }
+            }
+        };
+
         let mut test = test.into_iter();
         let test_command = test.next().unwrap();
         let (build_command, build_args) = match build {
