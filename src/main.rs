@@ -14,12 +14,12 @@ use tui::{
     backend::{Backend, CrosstermBackend},
     layout::{Alignment, Constraint, Direction, Layout},
     style::Color,
-    text::Spans,
-    widgets::{Block, BorderType, Borders, Paragraph, Wrap},
+    text::{Span, Spans},
+    widgets::{Block, BorderType, Borders, ListItem, Paragraph, Wrap},
     Frame, Terminal,
 };
 
-use widgets::ColoredList;
+use widgets::{ColoredList, StatefulList};
 mod widgets;
 
 pub struct ErrorTracker {
@@ -51,6 +51,7 @@ struct Test {
     number: usize,
     desc: Option<String>,
     directive: Option<Directive>,
+    yaml: String,
 
     parents: Vec<usize>,
 }
@@ -71,6 +72,7 @@ struct App {
 
     statuses: Vec<TestResult>,
     skipped: Vec<(String, Option<String>, Option<String>)>,
+    failure: StatefulList<(String, Option<String>, String)>,
     could_run: bool,
 }
 
@@ -118,6 +120,7 @@ impl App {
             could_run: true,
             statuses: Vec::new(),
             skipped: Vec::new(),
+            failure: StatefulList::empty(),
         };
 
         if let Err(e) = this.run_tests() {
@@ -131,6 +134,7 @@ impl App {
         self.could_run = false;
         self.statuses.clear();
         self.skipped.clear();
+        self.failure = StatefulList::empty();
 
         if let Some(build) = &self.build_command {
             let result = duct::cmd(build, &self.build_args)
@@ -181,6 +185,7 @@ impl App {
                         },
                         reason: d.reason.map(ToString::to_string),
                     }),
+                    yaml: test.yaml.join("\n"),
                     parents: parents.to_vec(),
                 }
             }
@@ -204,6 +209,7 @@ impl App {
 
         self.statuses.clear();
         self.skipped.clear();
+        let mut failure = Vec::new();
         for test in handle_body(document, Vec::new()) {
             let number = test
                 .parents
@@ -211,6 +217,7 @@ impl App {
                 .chain(std::iter::once(&test.number))
                 .join(".");
             if !test.result {
+                failure.push((number, test.desc, test.yaml));
                 self.statuses.push(TestResult::Fail);
             } else {
                 match test.directive {
@@ -222,6 +229,7 @@ impl App {
                 };
             }
         }
+        self.failure = StatefulList::with_items(failure);
 
         Ok(())
     }
@@ -247,6 +255,9 @@ impl App {
                                 self.err = Some(ErrorTracker::new(e));
                             }
                         }
+                        KeyCode::Up => self.failure.previous(),
+                        KeyCode::Down => self.failure.next(),
+                        KeyCode::Esc => self.failure.unselect(),
                         _ => (),
                     }
                 }
@@ -292,9 +303,20 @@ impl App {
             Constraint::Min(0)
         };
 
+        let body_constraint = if self.could_run {
+            Constraint::Min(0)
+        } else {
+            Constraint::Max(0)
+        };
+
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([error_constraint, Constraint::Max(5), skipped_constraint])
+            .constraints([
+                error_constraint,
+                Constraint::Max(5),
+                skipped_constraint,
+                body_constraint,
+            ])
             .split(inner);
 
         if let Some(e) = &self.err {
@@ -339,6 +361,28 @@ impl App {
             .block(Block::default().title("Skipped").borders(Borders::ALL));
             f.render_widget(p, chunks[2])
         }
+
+        self.failure.render(f, chunks[3], |(num, desc, yaml)| {
+            let mut lines = Vec::new();
+            lines.push(
+                Span::raw(
+                    num.clone()
+                        + &match desc {
+                            None => "".into(),
+                            Some(d) => format!(" - {d}"),
+                        },
+                )
+                .into(),
+            );
+            lines.push("----------".into());
+            lines.extend(
+                yaml.split('\n')
+                    .filter(|s| !s.is_empty())
+                    .map(|t| Spans::from(t.to_owned())),
+            );
+            lines.push("----------".into());
+            ListItem::new(lines)
+        });
     }
 }
 
