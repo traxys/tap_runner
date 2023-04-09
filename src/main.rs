@@ -1,5 +1,9 @@
-use std::time::{Duration, Instant};
+use std::{
+    process::Command,
+    time::{Duration, Instant},
+};
 
+use clap::Parser;
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     terminal::{EnterAlternateScreen, LeaveAlternateScreen},
@@ -11,11 +15,32 @@ use tui::{
     Frame, Terminal,
 };
 
-struct App {}
+struct App {
+    test_command: String,
+    test_args: Vec<String>,
+}
 
 impl App {
-    fn new() -> Self {
-        Self {}
+    fn new(test: Vec<String>) -> Self {
+        let mut test = test.into_iter();
+        let test_command = test.next().unwrap();
+
+        let mut this = Self {
+            test_command,
+            test_args: test.collect(),
+        };
+
+        let _ = this.run_tests();
+
+        this
+    }
+
+    fn run_tests(&mut self) -> anyhow::Result<()> {
+        let mut command = Command::new(&self.test_command);
+        command.args(&self.test_args);
+        let _output = command.output()?;
+
+        Ok(())
     }
 
     fn run<B: Backend>(
@@ -34,6 +59,9 @@ impl App {
                 if let Event::Key(key) = crossterm::event::read()? {
                     match key.code {
                         KeyCode::Char('q') => return Ok(()),
+                        KeyCode::Char('r') => {
+                            self.run_tests()?;
+                        }
                         _ => (),
                     }
                 }
@@ -57,14 +85,22 @@ impl App {
     }
 }
 
+#[derive(Parser, Debug)]
+struct Args {
+    #[arg(required = true)]
+    run_command: Vec<String>,
+}
+
 fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     crossterm::execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let res = App::new().run(&mut terminal, Duration::from_secs_f64(0.1));
+    let res = App::new(args.run_command).run(&mut terminal, Duration::from_secs_f64(0.1));
 
     crossterm::terminal::disable_raw_mode()?;
     crossterm::execute!(
