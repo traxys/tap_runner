@@ -9,5 +9,6 @@ anyhow = "1.0.70"
 clap = { version = "4.2.1", features = ["derive"] }
 crossterm = "0.26.1"
 duct = "0.13.6"
+itertools = "0.10.5"
 tap_parser = "0.1.1"
 tui = { package = "ratatui", version = "0.20.1" }

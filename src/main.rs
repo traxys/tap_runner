@@ -8,11 +8,13 @@ use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     terminal::{EnterAlternateScreen, LeaveAlternateScreen},
 };
+use itertools::Itertools;
 use tap_parser::{DirectiveKind, TapParser, TapStatement, TapTest};
 use tui::{
     backend::{Backend, CrosstermBackend},
     layout::{Alignment, Constraint, Direction, Layout},
     style::Color,
+    text::Spans,
     widgets::{Block, BorderType, Borders, Paragraph, Wrap},
     Frame, Terminal,
 };
@@ -40,12 +42,17 @@ impl ErrorTracker {
 #[derive(Debug)]
 struct Directive {
     key: tap_parser::DirectiveKind,
+    reason: Option<String>,
 }
 
 #[derive(Debug)]
 struct Test {
     result: bool,
+    number: usize,
+    desc: Option<String>,
     directive: Option<Directive>,
+
+    parents: Vec<usize>,
 }
 
 enum TestResult {
@@ -63,6 +70,7 @@ struct App {
     err: Option<ErrorTracker>,
 
     statuses: Vec<TestResult>,
+    skipped: Vec<(String, Option<String>, Option<String>)>,
     could_run: bool,
 }
 
@@ -109,6 +117,7 @@ impl App {
             err: None,
             could_run: true,
             statuses: Vec::new(),
+            skipped: Vec::new(),
         };
 
         if let Err(e) = this.run_tests() {
@@ -121,6 +130,7 @@ impl App {
     fn run_tests(&mut self) -> anyhow::Result<()> {
         self.could_run = false;
         self.statuses.clear();
+        self.skipped.clear();
 
         if let Some(build) = &self.build_command {
             let result = duct::cmd(build, &self.build_args)
@@ -145,40 +155,67 @@ impl App {
         let mut parser = TapParser::new();
         let document = parser.parse(&tap)?;
 
-        fn handle_body(body: Vec<TapStatement>) -> impl Iterator<Item = Test> + '_ {
-            body.into_iter().flat_map(handle_statement)
+        fn handle_body(
+            body: Vec<TapStatement>,
+            parents: Vec<usize>,
+        ) -> impl Iterator<Item = Test> + '_ {
+            body.into_iter()
+                .enumerate()
+                .flat_map(move |(i, st)| handle_statement(st, i, parents.clone()))
         }
 
-        fn handle_statement(statement: TapStatement) -> impl Iterator<Item = Test> + '_ {
-            fn handle_test_point(test: TapTest) -> Test {
+        fn handle_statement(
+            statement: TapStatement,
+            number: usize,
+            parents: Vec<usize>,
+        ) -> impl Iterator<Item = Test> + '_ {
+            fn handle_test_point(test: TapTest, parents: Vec<usize>, number: usize) -> Test {
                 Test {
                     result: test.result,
+                    number: test.number.unwrap_or(number),
+                    desc: test.desc.map(ToString::to_string),
                     directive: test.directive.as_ref().map(|d| Directive {
                         key: match &d.kind {
                             DirectiveKind::Skip => DirectiveKind::Skip,
                             DirectiveKind::Todo => DirectiveKind::Todo,
                         },
+                        reason: d.reason.map(ToString::to_string),
                     }),
+                    parents: parents.to_vec(),
                 }
             }
 
             match statement {
                 TapStatement::Subtest(s) => {
-                    let b: Box<dyn Iterator<Item = _>> = Box::new(handle_body(s.statements));
-                    Either3::One(b.chain(std::iter::once(handle_test_point(s.ending))))
+                    let mut child_lineage = parents.to_vec();
+                    child_lineage.push(number);
+                    let b: Box<dyn Iterator<Item = _>> =
+                        Box::new(handle_body(s.statements, child_lineage));
+                    Either3::One(b.chain(std::iter::once(handle_test_point(
+                        s.ending, parents, number,
+                    ))))
                 }
-                TapStatement::TestPoint(t) => Either3::Two(std::iter::once(handle_test_point(t))),
+                TapStatement::TestPoint(t) => {
+                    Either3::Two(std::iter::once(handle_test_point(t, parents, number)))
+                }
                 _ => Either3::Three(std::iter::empty()),
             }
         }
 
         self.statuses.clear();
-        for test in handle_body(document) {
+        self.skipped.clear();
+        for test in handle_body(document, Vec::new()) {
+            let number = test
+                .parents
+                .iter()
+                .chain(std::iter::once(&test.number))
+                .join(".");
             if !test.result {
                 self.statuses.push(TestResult::Fail);
             } else {
                 match test.directive {
                     Some(d) if d.key == tap_parser::DirectiveKind::Skip => {
+                        self.skipped.push((number, test.desc, d.reason));
                         self.statuses.push(TestResult::Skip);
                     }
                     _ => self.statuses.push(TestResult::Success),
@@ -239,6 +276,14 @@ impl App {
         let inner = outer.inner(size);
         f.render_widget(outer, size);
 
+        let skipped_constraint = if self.skipped.is_empty() {
+            Constraint::Max(0)
+        } else if self.skipped.len() <= 10 {
+            Constraint::Max((2 + self.skipped.len()) as u16)
+        } else {
+            Constraint::Max(12)
+        };
+
         let error_constraint = if self.err.is_none() {
             Constraint::Max(0)
         } else if self.could_run {
@@ -249,7 +294,7 @@ impl App {
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([error_constraint, Constraint::Max(5)])
+            .constraints([error_constraint, Constraint::Max(5), skipped_constraint])
             .split(inner);
 
         if let Some(e) = &self.err {
@@ -271,6 +316,29 @@ impl App {
         )
         .block(Block::default().title("Status").borders(Borders::ALL));
         f.render_widget(status, chunks[1]);
+
+        if !self.skipped.is_empty() {
+            let p = Paragraph::new(
+                self.skipped
+                    .iter()
+                    .map(|(parents, desc, reason)| {
+                        Spans::from(
+                            parents.clone()
+                                + &match desc {
+                                    None => "".into(),
+                                    Some(d) => format!(" - {d}"),
+                                }
+                                + &match reason {
+                                    None => "".into(),
+                                    Some(r) => format!(" ({r})"),
+                                },
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .block(Block::default().title("Skipped").borders(Borders::ALL));
+            f.render_widget(p, chunks[2])
+        }
     }
 }
 
