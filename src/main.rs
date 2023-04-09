@@ -10,14 +10,32 @@ use crossterm::{
 };
 use tui::{
     backend::{Backend, CrosstermBackend},
-    layout::Alignment,
-    widgets::{Block, BorderType, Borders},
+    layout::{Alignment, Constraint, Direction, Layout},
+    widgets::{Block, BorderType, Borders, Paragraph, Wrap},
     Frame, Terminal,
 };
 
+pub struct ErrorTracker {
+    error: String,
+    created_at: Instant,
+}
+
+impl ErrorTracker {
+    pub fn new<E>(e: E) -> Self
+    where
+        E: ToString,
+    {
+        Self {
+            error: e.to_string(),
+            created_at: Instant::now(),
+        }
+    }
+}
 struct App {
     test_command: String,
     test_args: Vec<String>,
+
+    err: Option<ErrorTracker>,
 }
 
 impl App {
@@ -28,9 +46,12 @@ impl App {
         let mut this = Self {
             test_command,
             test_args: test.collect(),
+            err: None,
         };
 
-        let _ = this.run_tests();
+        if let Err(e) = this.run_tests() {
+            this.err = Some(ErrorTracker::new(e));
+        };
 
         this
     }
@@ -60,7 +81,9 @@ impl App {
                     match key.code {
                         KeyCode::Char('q') => return Ok(()),
                         KeyCode::Char('r') => {
-                            self.run_tests()?;
+                            if let Err(e) = self.run_tests() {
+                                self.err = Some(ErrorTracker::new(e));
+                            }
                         }
                         _ => (),
                     }
@@ -69,6 +92,14 @@ impl App {
 
             if last_tick.elapsed() >= tick_rate {
                 last_tick = Instant::now();
+
+                if let Some(true) = self
+                    .err
+                    .as_ref()
+                    .map(|err| err.created_at.elapsed() > Duration::from_secs(8))
+                {
+                    self.err = None;
+                }
             }
         }
     }
@@ -80,8 +111,26 @@ impl App {
             .title("TAP Runner")
             .title_alignment(Alignment::Center)
             .border_type(BorderType::Rounded);
-        let _inner = outer.inner(size);
+        let inner = outer.inner(size);
         f.render_widget(outer, size);
+
+        let error_constraint = if self.err.is_none() {
+            Constraint::Max(0)
+        } else {
+            Constraint::Min(0)
+        };
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([error_constraint])
+            .split(inner);
+
+        if let Some(e) = &self.err {
+            let p = Paragraph::new(e.error.clone())
+                .block(Block::default().title("Error").borders(Borders::ALL))
+                .wrap(Wrap { trim: true });
+            f.render_widget(p, chunks[0]);
+        }
     }
 }
 
