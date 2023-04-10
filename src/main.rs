@@ -1,12 +1,13 @@
 use std::{
     env,
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
     str::FromStr,
     time::{Duration, Instant},
 };
 
 use ansi_to_tui::IntoText;
+use anyhow::Context;
 use clap::Parser;
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
@@ -96,6 +97,7 @@ struct App {
     build_args: Vec<String>,
 
     preview: bool,
+    root: Option<PathBuf>,
 
     location_filter: Option<Filter>,
 
@@ -136,6 +138,7 @@ impl App {
         build: Option<Vec<String>>,
         location_filter: Option<String>,
         preview: bool,
+        root: Option<PathBuf>,
     ) -> anyhow::Result<Self> {
         if preview {
             match which::which("bat") {
@@ -167,6 +170,7 @@ impl App {
             err: None,
             could_run: true,
             preview,
+            root,
             statuses: Vec::new(),
             skipped: Vec::new(),
             failure: StatefulList::empty(),
@@ -485,7 +489,7 @@ impl App {
                     .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                     .split(chunks[3]);
 
-                match generate_failure_preview(location, preview_chunks[1]) {
+                match generate_failure_preview(self.root.as_deref(), location, preview_chunks[1]) {
                     Ok(p) => {
                         f.render_widget(
                             Paragraph::new(p).block(Block::default().borders(Borders::all())),
@@ -530,8 +534,15 @@ impl App {
     }
 }
 
-fn generate_failure_preview(location: &Location, area: Rect) -> anyhow::Result<Text> {
-    if !Path::new(&location.file).exists() {
+fn generate_failure_preview(
+    root: Option<&Path>,
+    location: &Location,
+    area: Rect,
+) -> anyhow::Result<Text<'static>> {
+    let file = root
+        .map(|r| r.join(&location.file))
+        .unwrap_or_else(|| Path::new(&location.file).to_path_buf());
+    if !file.exists() {
         anyhow::bail!("File {} does not exist", location.file)
     }
 
@@ -541,7 +552,7 @@ fn generate_failure_preview(location: &Location, area: Rect) -> anyhow::Result<T
         .arg(format!(
             "bat --force-colorization --terminal-width {} {} --highlight-line {}",
             area.width - 2,
-            location.file,
+            file.to_str().context("file path is not UTF-8")?,
             location.line
         ))
         .output()?
@@ -575,6 +586,8 @@ struct Args {
     location_filter: Option<String>,
     #[arg(long, short, requires = "location_filter")]
     preview: bool,
+    #[arg(long, short, requires = "location_filter")]
+    root: Option<PathBuf>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -591,6 +604,7 @@ fn main() -> anyhow::Result<()> {
         args.build_command,
         args.location_filter,
         args.preview,
+        args.root,
     )?
     .run(&mut terminal, Duration::from_secs_f64(0.1));
 
